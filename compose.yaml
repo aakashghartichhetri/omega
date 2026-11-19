@@ -1,0 +1,61 @@
+services:
+  database:
+    image: postgres:16.10-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-omega}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-omega}
+      POSTGRES_DB: ${POSTGRES_DB:-omega}
+    volumes:
+      - omega-postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-omega}:${POSTGRES_PASSWORD:-omega}@database:5432/${POSTGRES_DB:-omega}
+      OMEGA_ENGINE_PATH: /usr/local/bin/omega-engine
+      OMEGA_API_KEY: ${OMEGA_API_KEY:-}
+    ports:
+      - "127.0.0.1:${OMEGA_API_HOST_PORT:-8001}:8000"
+    depends_on:
+      database:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=2)"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command: ["python", "-m", "app.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-omega}:${POSTGRES_PASSWORD:-omega}@database:5432/${POSTGRES_DB:-omega}
+      OMEGA_ENGINE_PATH: /usr/local/bin/omega-engine
+    depends_on:
+      backend:
+        condition: service_healthy
+    stop_grace_period: 140s
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      API_PROXY_TARGET: http://backend:8000
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      backend:
+        condition: service_healthy
+
+volumes:
+  omega-postgres:

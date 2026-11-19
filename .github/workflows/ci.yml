@@ -1,0 +1,82 @@
+name: CI
+on:
+  push:
+  pull_request:
+
+jobs:
+  tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Rust tests
+        run: cargo test --manifest-path rust-engine/Cargo.toml --locked
+      - name: Release Rust binary
+        run: cargo build --manifest-path rust-engine/Cargo.toml --release --locked
+      - name: Python API, worker, migrations and property tests
+        working-directory: backend
+        env:
+          DATABASE_URL: sqlite+pysqlite://
+        run: |
+          python -m pip install -r requirements-dev.txt
+          python -m pytest -q
+      - name: Deterministic real-engine benchmark
+        working-directory: backend
+        env:
+          OMEGA_ENGINE_PATH: ../rust-engine/target/release/omega-engine
+        run: python -m app.benchmark --seed 42 --machines 4 --job-count 16 --case-count 4 --holdout-count 3 --candidates 100
+      - name: React TypeScript + Vite production build
+        working-directory: frontend
+        run: |
+          if [ -f package-lock.json ]; then npm ci --no-audit --no-fund; else npm install --no-audit --no-fund; fi
+          npm run build
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    services:
+      database:
+        image: postgres:16.10-alpine
+        env:
+          POSTGRES_USER: omega
+          POSTGRES_PASSWORD: omega
+          POSTGRES_DB: omega_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U omega -d omega_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build Rust engine
+        run: cargo build --manifest-path rust-engine/Cargo.toml --release --locked
+      - name: Real PostgreSQL / Rust / API / worker checks
+        working-directory: backend
+        env:
+          DATABASE_URL: postgresql+psycopg://omega:omega@localhost:5432/omega_test
+          OMEGA_TEST_POSTGRES: '1'
+          OMEGA_ENGINE_PATH: ../rust-engine/target/release/omega-engine
+        run: |
+          python -m pip install -r requirements-dev.txt
+          alembic upgrade head
+          python -m pytest -q tests/test_postgres_integration.py tests/test_postgres_jobs.py
+
+  image-builds:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Backend production image (includes Rust)
+        run: docker build -f backend/Dockerfile -t omega-api:ci .
+      - name: Frontend production image (includes type-check)
+        run: docker build -f frontend/Dockerfile.production -t omega-web:ci .
